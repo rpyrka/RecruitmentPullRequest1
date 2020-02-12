@@ -53,7 +53,7 @@ exports.handler = async(event, context, callback) => {
 
         let promises = [];
 
-        for (let i = chunkStart; i < chunkEnd; i++) {
+        for (let i = chunkStart; i < Math.min(chunkEnd, channels.length); i++) {
             console.log(`Channel #${i} id: `, channels[i].id);
             promises.push(processChannelPosts(channels[i], fetchedObjects, defaultPageSize, startTime));
         }
@@ -64,7 +64,7 @@ exports.handler = async(event, context, callback) => {
         filterMissingPostsFromEdges(fetchedObjects);
 
         await saveChatRepliesToDynamo(fetchedObjects);
-        await uploadAllToS3(fetchedObjects, filenames, pageDownloaderBucket);
+        await uploadAllToS3(fetchedObjects, filenames, pageDownloaderBucket, chunkStart);
 
         event.page.chunkStart = chunkEnd;
         event.page.nextPageUrl = chunkEnd < channelsPerPage ? 'true' : '';
@@ -91,7 +91,6 @@ function filterRemovedUsersFromEdges(fetchedObjects) {
     edgesArray.forEach(edge => {
         console.log(`${edge} length before: `, fetchedObjects[edge].length);
         fetchedObjects[edge] = fetchedObjects[edge].filter(edge => fetchedObjects.usernameByUserid[edge.from]);
-        fetchedObjects[edge].forEach(edge => edge.id = `${edge.from}-viewerOf${edge.to}`);
         console.log(`${edge} length after: `, fetchedObjects[edge].length);
     });
 }
@@ -138,7 +137,7 @@ async function processChannelPosts(channel, fetchedObjects, pageSize, startTime)
 
     await Promise.all(promises);
 
-    saveViewersAndContributors(channelData, fetchedObjects);
+    await saveViewersAndContributors(channelData, fetchedObjects);
 }
 
 function getFileNames(pagingContext) {
@@ -179,7 +178,7 @@ async function fillWithPreviousStep(fetchedObjects, filenames, name, pageDownloa
         previousData = (await mattermostShared.getJsonFromS3(filenames[`${name}FileName`], pageDownloaderBucket)).Body.toString();
     }
     catch (error) {
-        console.log('No previous data was found for: ', filenames[name + 'FileName'], pageDownloaderBucket, error);
+        console.log('No previous data was found for: ', filenames[`${name}FileName`], pageDownloaderBucket, error);
     }
 
     if (previousData !== '[]') {
@@ -260,14 +259,16 @@ async function saveViewersAndContributors(channelData, fetchedObjects) {
         viewer.firstmessagedate = viewer.firstMessageReadDate || 0;
         viewer.lastmessagedate = viewer.lastMessageReadDate || 0;
         viewer.messagecount = channelData.channel.messagecount;
-        if (memberStats[viewer.userId]) {
-            viewer.messagereadcount = memberStats[viewer.userId];
+        viewer.id = `${viewer.from}-contributorOf${viewer.to}`;
+        if (memberStats[viewer.from]) {
+            viewer.messagereadcount = memberStats[viewer.from];
         }
     });
     fetchedObjects.channelViewers = fetchedObjects.channelViewers.concat(viewers);
 
     const contributors = channelMembersArray.filter(user => user.messagecount > 0).slice(0);
     contributors.forEach(contributor => {
+        contributor.id = `${contributor.from}-contributorOf${contributor.to}`;
         contributor.firstmessagedate = contributor.firstMessageWriteDate || 0;
         contributor.lastmessagedate = contributor.lastMessageWriteDate || 0;
     });
@@ -281,9 +282,11 @@ async function uploadAllToS3(fetchedObjects, fileNames, pageDownloaderBucket) {
 
         prepareBuffer(fetchedObjects, name);
 
-        console.log(`${name} length before fillWithPreviousStep`, fetchedObjects[`${name}Buffer`].length);
-        await fillWithPreviousStep(fetchedObjects, fileNames, name, pageDownloaderBucket);
-        console.log(`${name} length after fillWithPreviousStep`, fetchedObjects[`${name}Buffer`].length);
+        if (chunkStart > 0) {
+            console.log(`${name} length before fillWithPreviousStep`, fetchedObjects[`${name}Buffer`].length);
+            await fillWithPreviousStep(fetchedObjects, fileNames, name, pageDownloaderBucket);
+            console.log(`${name} length after fillWithPreviousStep`, fetchedObjects[`${name}Buffer`].length);
+        }
 
         await mattermostShared.uploadJsonToS3(fetchedObjects[`${name}Buffer`], fileNames[name + 'FileName'], pageDownloaderBucket);
         console.log(`Saved ${name} to ${fileNames[name + 'FileName']}`, fetchedObjects[name]);
@@ -447,8 +450,8 @@ async function parsePostByType(post, channelData, fetchedObjects) {
 
             createContainsEdge(channelData.channel.id, post.id, fetchedObjects);
 
-            increaseReadCountForActiveChannelMembers(channelData, post);
             increaseWriteCountForAuthor(channelData, post);
+            increaseReadCountForActiveChannelMembers(channelData, post);
             break;
     }
 }
