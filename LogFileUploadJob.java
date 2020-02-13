@@ -6,7 +6,9 @@ import com.virtualoffice.client.datacapture.Constants;
 import com.virtualoffice.client.net.PortalClient;
 
 import java.io.File;
+import java.io.FileOutputStream;
 import java.io.IOException;
+import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.Map;
 
@@ -75,7 +77,9 @@ public class LogFileUploadJob extends AbstractJob {
             if (logFile.exists()) {
                 String pathCopy = path + ".bak";
                 logFileCopy = new File(pathCopy);
-                FileUtils.copyFile(logFile, logFileCopy);
+                FileOutputStream fos = new FileOutputStream(logFileCopy);
+                Files.copy(logFile.toPath(), fos);
+                fos.close();
                 Map<String, File> map = new HashMap<>();
                 map.put("log_file", logFileCopy);
                 PortalClient.getInstance().upload(url, map);
