@@ -7,20 +7,32 @@ import {
   GridOptions,
   IServerSideDatasource,
   IServerSideGetRowsParams,
+  RowNode,
   ValueFormatterParams,
   ValueSetterParams,
 } from 'ag-grid-community';
 import { combineLatest, Observable, of, Subject } from 'rxjs';
 import { filter, map, takeUntil } from 'rxjs/operators';
 
-import {} from '@app/constants';
-import { CostObject, Metric, PageRequest, Scenario, Session, User } from '@app/models';
+import {
+  CostObject,
+  DataTypeEnum,
+  ExpressionEditorModel,
+  Metric,
+  PageRequest,
+  Scenario,
+  Session,
+  User,
+  VersionMetric,
+} from '@app/models';
 import { MatSelectComponent } from '@app/shared';
 import {
   ChangeTrackerSelector,
   CostObjectState,
   DeleteMetrics,
+  ExpressionEditorState,
   LoadCostObjectsWithHierarchies,
+  LoadModel,
   LoadSessions,
   MetricState,
   ResetChanges,
@@ -42,6 +54,19 @@ import { dataTypeKeyValueList, dataTypeNameMap } from '@app/util';
   changeDetection: ChangeDetectionStrategy.OnPush,
 })
 export class MetricsComponent implements OnInit, OnDestroy {
+  get selectedMetricName(): string {
+    return this.hasSelectedRows ? this.selectedMetric.Name : '';
+  }
+
+  get selectedMetricCostObjectName(): string {
+    return this.hasSelectedRows ? this.selectedMetric.CostObject.Name : '';
+  }
+
+  get toggleIcon(): string {
+    return this.isExpressionEditorVisible ? MetricsComponent.iconTable : MetricsComponent.iconCalculator;
+  }
+  private static iconTable: string = 'table';
+  private static iconCalculator: string = 'calculator';
   private static headerName: string = 'Name';
   private static fieldName: string = 'Name';
   private static headerDataType: string = 'Data Type';
@@ -61,16 +86,23 @@ export class MetricsComponent implements OnInit, OnDestroy {
   private static whereClauseGlobalMetrics: string = '(it.CostObject.IsGlobals==True)';
   private static whereClauseNonGlobalMetrics: string = '(it.CostObject.IsGlobals==False)';
   private static globalMetricsIdentifier: string = 'global';
-
   private destroy$: Subject<void> = new Subject<void>();
   private gridOptions: GridOptions;
   private costObjectList: CostObject[];
   private activeTimePeriodId: number;
+  private activeVersionId: number;
 
-  readonly fileUploadContext = 'Metrics';
+  private readonly nullVersionMetric: VersionMetric = new VersionMetric();
+  private readonly nullMetric: Metric = new Metric('', 0, DataTypeEnum.None, '');
+  private selectedMetric: Metric;
 
-  isUploadEntitiesPaneDroppedDown: boolean = false;
-  cannotModify$: Observable<boolean>;
+  readonly uploadDownloadContext = 'Metrics';
+
+  isChangingDisabled$: Observable<boolean> = of(true);
+  expressionEditorModel: ExpressionEditorModel;
+  hasSelectedRows: boolean = false;
+  selectedVersionMetric: VersionMetric;
+  isExpressionEditorVisible = false;
   pageTitle: string = 'Metrics';
   isGlobalMetrics: boolean = false;
   isReadOnlyGrid: boolean = false;
@@ -87,7 +119,7 @@ export class MetricsComponent implements OnInit, OnDestroy {
   };
   columnDefs: ColDef[];
 
-  areChangeButtonsDisabled$: Observable<boolean>;
+  areChangeButtonsDisabled$: Observable<boolean> = of(true);
 
   @Select(ChangeTrackerSelector.hasNoChanges)
   hasNoChanges$: Observable<boolean>;
@@ -113,8 +145,14 @@ export class MetricsComponent implements OnInit, OnDestroy {
   @Select(SessionState.getLastSession)
   lastSession$: Observable<Session>;
 
+  @Select(ExpressionEditorState.getModel)
+  expressionEditorModel$: Observable<ExpressionEditorModel>;
+
   @Select(UserPermissionState.getHasModifyModelPermission)
   hasModifyModelPermission$: Observable<boolean>;
+
+  @Select(ChangeTrackerSelector.getIsSaveDisabled)
+  isSaveDisabled$: Observable<boolean>;
 
   constructor(private route: ActivatedRoute) {}
 
@@ -159,12 +197,14 @@ export class MetricsComponent implements OnInit, OnDestroy {
   }
 
   ngOnInit(): void {
-    this.fetchUserPermissionAndReadOnlyStatus();
     this.getMetricsTypeFromRouteParameters();
+    this.loadModel();
     this.loadCostObjects();
-    this.retrieveCostObjectsFromObservable();
+    this.getReadOnlyStatusFromActiveScenario();
+    this.fetchUserPermissionAndReadOnlyStatus();
     this.setChangeButtonsDisabledState();
     this.getScenarioDataFromActiveScenario();
+    this.retrieveExpressionEditorModel();
   }
 
   onGridReady(gridOptions: GridOptions): void {
@@ -172,17 +212,65 @@ export class MetricsComponent implements OnInit, OnDestroy {
 
     const dataSource: IServerSideDatasource = this.createDataSource();
     this.gridOptions.api.setServerSideDatasource(dataSource);
-    this.getReadOnlyStatusFromActiveScenario();
-    this.setupGridColumns();
+    this.retrieveCostObjectsFromObservable();
   }
 
-  toggleUploadPaneDroppedDown(): void {
-    this.isUploadEntitiesPaneDroppedDown = !this.isUploadEntitiesPaneDroppedDown;
+  onRowSelected(): void {
+    this.hasSelectedRows = this.hasSelectedMetricRows();
+    this.hasSelectedRows ? this.setSelectionData() : this.setDefaultSelectionData();
+  }
+
+  toggleExpressionEditor(): void {
+    this.isExpressionEditorVisible = !this.isExpressionEditorVisible && this.hasSelectedRows;
+  }
+
+  onEquationDescriptionChange(event: any): void {
+    this.selectedVersionMetric.EquationDescription = event.target.value.trim();
+    this.updateSelectedVersionMetric();
+  }
+
+  onEquationCodeChange(equation: string): void {
+    this.updateEquationIfDifferentFromOriginal(equation);
+  }
+
+  @Dispatch()
+  private loadModel(): LoadModel {
+    return new LoadModel();
   }
 
   @Dispatch()
   private loadCostObjects(): LoadCostObjectsWithHierarchies {
     return new LoadCostObjectsWithHierarchies();
+  }
+
+  @Dispatch()
+  private updateSelectedVersionMetric(): UpdateEntity {
+    return new UpdateEntity({ entity: this.selectedVersionMetric, type: VersionMetric.type });
+  }
+
+  private updateEquationIfDifferentFromOriginal(equation: string): void {
+    if (this.selectedVersionMetric.Equation !== equation) {
+      this.selectedVersionMetric.Equation = equation;
+      this.updateSelectedVersionMetric();
+    }
+  }
+
+  private retrieveExpressionEditorModel(): void {
+    this.expressionEditorModel$.pipe(takeUntil(this.destroy$)).subscribe(result => {
+      this.expressionEditorModel = result;
+    });
+  }
+
+  private fetchUserPermissionAndReadOnlyStatus(): void {
+    const scenarioData$ = this.activeScenario$.pipe(
+      filter(scenario => !!scenario),
+      takeUntil(this.destroy$)
+    );
+    const userPermissionData$ = this.hasModifyModelPermission$.pipe(takeUntil(this.destroy$));
+
+    this.isChangingDisabled$ = combineLatest(scenarioData$, userPermissionData$).pipe(
+      map(([scenario, hasModifyModelPermission]) => scenario.ReadOnly || !hasModifyModelPermission)
+    );
   }
 
   private createDataSource(): IServerSideDatasource {
@@ -218,20 +306,8 @@ export class MetricsComponent implements OnInit, OnDestroy {
       )
       .subscribe((scenario: Scenario) => {
         this.isReadOnlyGrid = scenario.ReadOnly;
-        this.setupGridColumns();
+        this.activeVersionId = scenario.VersionId;
       });
-  }
-
-  private fetchUserPermissionAndReadOnlyStatus(): void {
-    const scenarioData$ = this.activeScenario$.pipe(
-      filter(scenario => !!scenario),
-      takeUntil(this.destroy$)
-    );
-    const userPermissionData$ = this.hasModifyModelPermission$.pipe(takeUntil(this.destroy$));
-
-    this.cannotModify$ = combineLatest(scenarioData$, userPermissionData$).pipe(
-      map(([scenario, hasModifyModelPermission]) => scenario.ReadOnly || !hasModifyModelPermission)
-    );
   }
 
   private getMetricsTypeFromRouteParameters(): void {
@@ -252,11 +328,38 @@ export class MetricsComponent implements OnInit, OnDestroy {
         filter(costObjects => !!costObjects),
         takeUntil(this.destroy$)
       )
-      .subscribe(costObjectList => (this.costObjectList = costObjectList));
+      .subscribe(costObjectList => {
+        this.costObjectList = costObjectList;
+        this.setupGridColumns();
+      });
   }
 
   private setChangeButtonsDisabledState(): void {
     this.areChangeButtonsDisabled$ = this.hasNoChanges$.pipe(map(hasNoChanges => hasNoChanges || this.isReadOnlyGrid));
+  }
+
+  private hasSelectedMetricRows(): boolean {
+    const selectedNodes: RowNode[] = this.gridOptions.api.getSelectedRows();
+    return selectedNodes && selectedNodes.length > 0;
+  }
+
+  private setSelectionData(): void {
+    this.selectedMetric = this.getSelectedMetric();
+    this.expressionEditorModel.baseCostObject = this.selectedMetric.CostObject;
+    this.selectedVersionMetric = this.selectedMetric.VersionMetrics.find(
+      item => item.VersionId === this.activeVersionId
+    );
+  }
+
+  private getSelectedMetric(): Metric {
+    return this.hasSelectedRows ? this.gridOptions.api.getSelectedNodes()[0].data : this.nullMetric;
+  }
+
+  private setDefaultSelectionData(): void {
+    this.selectedMetric = this.nullMetric;
+    this.selectedVersionMetric = this.nullVersionMetric;
+    this.expressionEditorModel.baseCostObject = null;
+    this.toggleExpressionEditor();
   }
 
   private getScenarioDataFromActiveScenario(): void {
@@ -279,6 +382,11 @@ export class MetricsComponent implements OnInit, OnDestroy {
   @Dispatch()
   private loadSessions(timePeriodId: number): LoadSessions {
     return new LoadSessions(timePeriodId);
+  }
+
+  @Dispatch()
+  private createMetric(): AddMetric {
+    return new AddMetric();
   }
 
   private setupGridColumns(): void {
@@ -358,11 +466,6 @@ export class MetricsComponent implements OnInit, OnDestroy {
         return costObject ? costObject.Name : params.data.CostObjectId;
       },
     };
-  }
-
-  @Dispatch()
-  private createMetric(): AddMetric {
-    return new AddMetric();
   }
 
   private setMetricFields({ newValue, oldValue, data, colDef }: ValueSetterParams): boolean {
