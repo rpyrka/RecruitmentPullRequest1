@@ -61,8 +61,10 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -96,6 +98,8 @@ import static org.powermock.api.support.membermodification.MemberModifier.suppre
 @PrepareForTest({UIPermission.class, AFPermission.class})
 public class TeamServiceImplTest extends BaseMockitoTest {
 
+    private static final long INHERITED_USER_ID = 2L;
+    private static final long DIRECT_USER_ID = 1L;
     private static final String PARENT_TEAM_NAME = "ParentTeam";
     private static final String SUB_TEAM_NAME = "SubTeam";
     private static final long PARENT_TEAM_ID = 100;
@@ -247,7 +251,7 @@ public class TeamServiceImplTest extends BaseMockitoTest {
     public void givenPopulateTeamMembersIsFalseWhenGetByIdThenPopulateMembersNeverInvoked() {
         mockTeamMapCacheForParentTeam();
 
-        com.m1.af.api.model.team.Team team = object.getById(1L, true, false);
+        com.m1.af.api.model.team.Team team = object.getById(1L, true, false, true);
 
         assertTeamEquals(team);
         verify(manager, never()).populateMembers(any());
@@ -257,7 +261,7 @@ public class TeamServiceImplTest extends BaseMockitoTest {
     public void givenPopulateTeamMembersIsTrueWhenGetByIdThenPopulateMembersInvoked() {
         mockTeamMapCacheForParentTeam();
 
-        com.m1.af.api.model.team.Team team = object.getById(1L, true, true);
+        com.m1.af.api.model.team.Team team = object.getById(1L, true, true, true);
 
         assertTeamEquals(team);
         verify(manager, times(1)).populateMembers(any());
@@ -1058,6 +1062,55 @@ public class TeamServiceImplTest extends BaseMockitoTest {
         assertThat(capabilities.getCapabilityValue(TeamCapabilities.CAP_FROM_TEAMEMAIL_ADDR)).isEqualTo(greeting.getFromEmail());
         assertThat(capabilities.getCapabilityValue(TeamCapabilities.CAP_FROM_TEAMVOICENOTIFICATIONSYSTEM))
             .isEqualTo(greeting.getVoiceSystemName());
+    }
+
+    @Test
+    public void givenShowInheritedTeamLeadersWhenGetTeamLeadersThenContainsInheritedTeamLeaders() {
+        final Team team = setupMockTeamWithTeamLeaders(INHERITED_USER_ID, DIRECT_USER_ID);
+
+        List<TeamLeaderUserInfo> teamLeaderUserInfos = object.getTeamLeaders(team, true);
+
+        assertEquals(2, teamLeaderUserInfos.size());
+        assertEquals(DIRECT_USER_ID, teamLeaderUserInfos.get(0).getUserId());
+        assertEquals(INHERITED_USER_ID, teamLeaderUserInfos.get(1).getUserId());
+
+        verify(object, times(1)).buildAllLeadersMap(team);
+    }
+
+    @Test
+    public void givenShowInheritedTeamLeadersIsFalseWhenGetTeamLeadersThenContainsOnlyDirectTeamLeaders() {
+        final Team team = setupMockTeamWithTeamLeaders(DIRECT_USER_ID);
+
+        List<TeamLeaderUserInfo> teamLeaderUserInfos = object.getTeamLeaders(team, false);
+
+        assertEquals(1, teamLeaderUserInfos.size());
+        assertEquals(DIRECT_USER_ID, teamLeaderUserInfos.get(0).getUserId());
+
+        verify(object, never()).buildAllLeadersMap(team);
+    }
+
+    private Team setupMockTeamWithTeamLeaders(Long... userIds) {
+        Team team = mockTeam(SAMPLE_TEAM_ID, SAMPLE_TEAM_NAME);
+        when(team.getLeaders()).thenReturn(Collections
+                .singletonList(new TeamLeader(SAMPLE_TEAM_ID, DIRECT_USER_ID, PERMISSION_PARENT)));
+        doReturn(Collections.singletonMap(2L,
+                new TeamLeader(SAMPLE_TEAM_ID, INHERITED_USER_ID, PERMISSION_PARENT))).when(object)
+                        .buildAllLeadersMap(team);
+        when(userManager
+                .findUsers(Collections.singletonList(new SearchConstraint(IUserManager.PROP_USER_ID,
+                        SearchOperator.IN_LIST, Arrays.asList(userIds)))))
+                                .thenReturn(createUsersById(userIds));
+        return team;
+    }
+
+    private static List<User> createUsersById(Long... userIds) {
+        List<User> users = new ArrayList<>();
+        for (Long userId : userIds) {
+            User user = new User(userId);
+            user.setEnabled(true);
+            users.add(user);
+        }
+        return users;
     }
 
     private TeamGreeting createGreeting(String email, String voiceName) {
